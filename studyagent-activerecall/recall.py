@@ -367,6 +367,7 @@ class ClaudeQuestionGenerator:
         prompt = self._create_question_prompt(concept, question_type, difficulty)
         
         try:
+            print(f"🔍 DEBUG: Calling Claude API for {concept.name}")
             response = self.client.messages.create(
                 model="claude-3-haiku-20240307",
                 max_tokens=500,
@@ -375,6 +376,8 @@ class ClaudeQuestionGenerator:
             
             # Parse the response to extract question and expected answer
             content = response.content[0].text
+            print(f"🔍 DEBUG: Claude response: {content}")
+            
             lines = content.strip().split('\n')
             
             question_text = ""
@@ -390,16 +393,23 @@ class ClaudeQuestionGenerator:
                         expected_answer += " " + " ".join(lines[i+1:])
                     break
             
+            if not question_text:
+                print("🔍 DEBUG: No question found in Claude response")
+                question_text = f"What can you tell me about {concept.name}?"
+            else:
+                print(f"🔍 DEBUG: Successfully generated question: {question_text}")
+            
             return Question(
                 concept_id=concept.id,
                 question_text=question_text,
-                expected_answer=expected_answer,
+                expected_answer=expected_answer or "Basic understanding expected",
                 difficulty=difficulty,
                 question_type=question_type
             )
             
         except Exception as e:
-            # Fallback question
+            print(f"🔍 DEBUG: Exception in question generation: {str(e)}")
+            # Fallback question when API fails
             return Question(
                 concept_id=concept.id,
                 question_text=f"What can you tell me about {concept.name}?",
@@ -523,7 +533,7 @@ class ClaudeQuestionGenerator:
         """Create a prompt for generating questions based on notes sections"""
         
         prompt = f"""
-You are creating a study question about {concept.name}, specifically focusing on: {section.title}
+You are creating a targeted study question about: {section.title}
 
 Notes content for this section:
 {section.content}
@@ -531,17 +541,22 @@ Notes content for this section:
 Question type: {question_type}
 Difficulty: {difficulty.name}
 
-Generate a focused question that:
-1. Tests understanding of this specific section: {section.title}
-2. Is appropriate for {difficulty.name.lower()} level
-3. Can be answered based on the notes content
-4. Focuses on ONE key concept from this section
+Generate a focused, specific question that:
+1. Tests understanding of ONE key concept from this section
+2. Is appropriate for {difficulty.name.lower()} level  
+3. Can be answered directly from the notes content
+4. Avoids generic "what can you tell me about..." phrasing
+5. Focuses on specific facts, definitions, or concepts
+
+Examples of good targeted questions:
+- For basic recall: "What are the main components of X?" "Why does Y happen?" "What is the time complexity of Z?"
+- For understanding: "How does X differ from Y?" "When would you use Z instead of W?"
 
 Format your response as:
-Question: [your question here]
-Expected Answer: [brief expected answer]
+Question: [specific, targeted question]
+Expected Answer: [brief answer based on the notes]
 
-Keep it simple and focused on just this section's content.
+Focus on creating a question that tests specific knowledge from this section.
 """
         
         try:
@@ -702,13 +717,40 @@ Hints: [Hint 1] | [Hint 2] | [Hint 3]
         history_text = "\n".join([f"{entry['role']}: {entry['content']}" for entry in conversation_history[-3:]])
         
         if is_correct:
-            prompt = f"""
+            # Check if we should transition to a new topic
+            should_transition = self._should_transition_topic(conversation_history, concept)
+            
+            if should_transition:
+                prompt = f"""
 The student gave a correct answer about {concept.name}: "{user_answer}"
+
+Recent conversation:
+{history_text}
+
+The student has demonstrated understanding of this aspect. Generate a response that:
+1. Acknowledges they're correct
+2. Smoothly transitions to a NEW related topic/aspect of {concept.name}
+3. Clearly indicates the topic shift (e.g., "Great! Now let's explore..." or "Perfect! Moving on to...")
+4. Asks ONE question about the new topic
+5. Keep it conversational and encouraging
+
+Study Material for reference:
+{concept.content}
+
+Respond in 2-3 sentences maximum as a tutor.
+"""
+            else:
+                prompt = f"""
+The student gave a correct answer about {concept.name}: "{user_answer}"
+
+Recent conversation:
+{history_text}
 
 Generate a brief, encouraging response that:
 1. Acknowledges they're correct
-2. Asks ONE simple follow-up question about a related aspect
+2. Asks ONE NEW follow-up question (different from previous questions)
 3. Keeps it conversational and brief
+4. Don't repeat questions already asked in the conversation
 
 Study Material for reference:
 {concept.content}
@@ -719,10 +761,13 @@ Respond in 1-2 sentences maximum as a tutor.
             prompt = f"""
 The student gave an incomplete answer about {concept.name}: "{user_answer}"
 
+Recent conversation:
+{history_text}
+
 Generate a brief, gentle hint that:
 1. Focuses on ONE specific aspect they should think about
 2. Uses a phrase like "think about..." or "consider..."
-3. Doesn't ask multiple questions
+3. Doesn't repeat previous hints from the conversation
 4. Is supportive but concise
 
 Study Material for reference:
@@ -743,6 +788,29 @@ Respond in 1-2 sentences maximum as a helpful tutor.
                 return f"Good! What's one advantage of using {concept.name.lower()}?"
             else:
                 return f"Think about what makes {concept.name.lower()} special compared to other data structures."
+    
+    def _should_transition_topic(self, conversation_history: List[Dict[str, str]], concept: Concept) -> bool:
+        """Determine if we should transition to a new topic based on conversation flow"""
+        
+        # If we've had 2-3 exchanges on the same subtopic, consider transitioning
+        if len(conversation_history) >= 4:  # At least 2 exchanges (4 messages)
+            # Look at recent exchanges to see if student is demonstrating understanding
+            recent_student_responses = [
+                entry['content'] for entry in conversation_history[-4:] 
+                if entry['role'] == 'student'
+            ]
+            
+            # If student has given substantive answers (not just "I don't know"), consider transitioning
+            substantive_responses = [
+                resp for resp in recent_student_responses 
+                if len(resp.split()) > 3 and not any(phrase in resp.lower() 
+                    for phrase in ['not sure', "don't know", 'idk', 'no idea'])
+            ]
+            
+            # Transition if we have 2+ substantive responses in recent history
+            return len(substantive_responses) >= 2
+        
+        return False
     
     def identify_weaknesses(self, concept: Concept, user_answer: str, correct_answer: str) -> List[str]:
         """Identify specific areas where the student is struggling"""
@@ -844,6 +912,72 @@ class ActiveRecallSystem:
         )
         
         return conversation_state
+    
+    def handle_user_question(self, conversation_state: ConversationState, user_question: str) -> Dict:
+        """Handle when the user asks a question instead of answering"""
+        concept = self.db.get_concept(conversation_state.concept_id)
+        
+        # Add user question to conversation history
+        conversation_state.conversation_history.append({
+            "role": "student", 
+            "content": user_question
+        })
+        
+        # Generate an answer to their question using Claude
+        prompt = f"""
+The student is asking a question about {concept.name}: "{user_question}"
+
+Study Material for reference:
+{concept.content}
+
+Conversation history:
+{chr(10).join([f"{entry['role']}: {entry['content']}" for entry in conversation_state.conversation_history[-3:]])}
+
+Provide a helpful, clear answer to their question. Then suggest a follow-up question that:
+1. Builds on what you just explained
+2. Tests their understanding of the concept you explained
+3. Keeps the learning momentum going
+
+Format your response as:
+Answer: [Your clear explanation here]
+Follow-up: [A question to test their understanding]
+"""
+        
+        try:
+            response = self.question_generator.client.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=400,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            content = response.content[0].text
+            lines = content.strip().split('\n')
+            
+            answer = ""
+            follow_up = ""
+            
+            for line in lines:
+                if line.startswith("Answer:"):
+                    answer = line.replace("Answer:", "").strip()
+                elif line.startswith("Follow-up:"):
+                    follow_up = line.replace("Follow-up:", "").strip()
+            
+            # Add tutor's answer to conversation history
+            conversation_state.conversation_history.append({
+                "role": "tutor",
+                "content": answer
+            })
+            
+            return {
+                "answer": answer or "That's a great question! Let me explain...",
+                "follow_up_question": follow_up
+            }
+            
+        except Exception as e:
+            return {
+                "answer": f"That's a great question about {concept.name}! Let me think about that...",
+                "follow_up_question": "What specific aspect would you like to explore further?"
+            }
     
     def continue_conversation(self, conversation_state: ConversationState, user_response: str) -> Dict:
         """Continue the interactive conversation based on user response"""

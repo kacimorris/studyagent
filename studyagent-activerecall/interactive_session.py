@@ -63,21 +63,31 @@ class InteractiveSession:
         while conversation_active:
             # Get user input
             print("\n" + "-"*50)
-            user_response = input("👤 Your answer: ").strip()
+            user_response = input("👤 Your response (or type '?' to ask a question): ").strip()
             
             if user_response.lower() in ['quit', 'exit', 'q']:
                 print("📚 Session ended. Progress saved!")
                 break
             
             if not user_response:
-                print("❌ Please provide an answer or type 'quit' to exit.")
+                print("❌ Please provide a response or type 'quit' to exit.")
                 continue
             
-            # Process the response
-            result = self.system.continue_conversation(self.current_conversation, user_response)
-            
-            # Show the AI tutor's guiding response
-            print(f"\n🤖 Tutor: {result['guiding_response']}")
+            # Check if user is asking a question
+            if user_response.startswith('?') or any(word in user_response.lower() for word in ['what is', 'how do', 'why does', 'can you explain', 'what does']):
+                # Handle user question
+                result = self.system.handle_user_question(self.current_conversation, user_response)
+                print(f"\n🤖 Tutor: {result['answer']}")
+                
+                # Ask a follow-up question to continue the learning
+                if result.get('follow_up_question'):
+                    print(f"\n🤖 Tutor: {result['follow_up_question']}")
+            else:
+                # Process as normal answer to tutor's question
+                result = self.system.continue_conversation(self.current_conversation, user_response)
+                
+                # Show the AI tutor's guiding response
+                print(f"\n🤖 Tutor: {result['guiding_response']}")
             
             # The conversation continues until user decides to end it
         
